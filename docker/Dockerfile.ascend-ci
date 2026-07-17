@@ -145,15 +145,12 @@ RUN pip3 install --no-cache-dir \
 # -----------------------------------------------------------------------------
 # Final sanity check at build time: verify the pinned versions survived.
 # -----------------------------------------------------------------------------
-RUN python3 - <<'PY'
-import torch, torch_npu, transformer_engine
-import mock, wrapt, pytest, coverage
-assert torch.__version__.startswith("2.7.1"), torch.__version__
-assert torch_npu.__version__.startswith("2.7.1.post2"), torch_npu.__version__
-print("torch:", torch.__version__)
-print("torch_npu:", torch_npu.__version__)
-print("transformer_engine:", transformer_engine.__version__)
-print("build-time dependency check OK")
-PY
+RUN python3 -c "import torch, torch_npu, transformer_engine, mock, wrapt, pytest, coverage; \
+assert torch.__version__.startswith('2.7.1'), torch.__version__; \
+assert torch_npu.__version__.startswith('2.7.1.post2'), torch_npu.__version__; \
+print('torch:', torch.__version__); \
+print('torch_npu:', torch_npu.__version__); \
+print('transformer_engine:', transformer_engine.__version__); \
+print('build-time dependency check OK')"
 
 WORKDIR /workspace
