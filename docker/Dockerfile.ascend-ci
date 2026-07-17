@@ -1,0 +1,159 @@
+# =============================================================================
+# Megatron-LM-FL Ascend (NPU) CI image
+# Target: Ascend A3 (910C), aarch64, CANN 9.0.0, Python 3.12, torch 2.7.1
+#
+# Build (must run on an ARM64 / 910C host):
+#   docker build --network host \
+#     --build-arg HTTP_PROXY="$http_proxy" \
+#     --build-arg HTTPS_PROXY="$https_proxy" \
+#     -f docker/Dockerfile.ascend-ci \
+#     -t harbor.baai.ac.cn/flagscale/megatron-lm-fl:ascend-a3-cann9.0-torch2.7.1-py312 \
+#     .
+#
+# This image bundles the *environment* only:
+#   - torch 2.7.1+cpu, torch_npu 2.7.1.post2
+#   - NVIDIA Megatron-LM (baseline that registers `megatron-core`)
+#   - TransformerEngine-FL  @ 3b5fbb589b595a869578649ffef990c92fb1ed5a
+#   - FlagScale             @ 75ad1ee5b2983d2c709707f290de5b0c818a2137
+#   - pinned protobuf / triton / torchvision + test deps (pytest/mock/wrapt/coverage)
+#
+# It does NOT bundle Megatron-LM-FL: that is the code under test and is checked
+# out fresh by CI, then installed with `pip install -e .` on top of this image.
+# =============================================================================
+FROM quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12
+
+# Proxy is only needed at build time to reach pytorch.org / gitcode / github.
+# Passed as ARG (not ENV) so credentials do not persist in the final image env.
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ENV http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-lc"]
+
+# -----------------------------------------------------------------------------
+# Layer 1: system tools (git, build toolchain, gettext-base for envsubst)
+#          yq + uv are installed as static binaries.
+# -----------------------------------------------------------------------------
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        git wget curl ca-certificates \
+        build-essential gcc g++ make cmake \
+        gettext-base && \
+    rm -rf /var/lib/apt/lists/*
+
+# yq (mikefarah v4) — required by functional test shell scripts
+RUN wget -qO /usr/local/bin/yq \
+        https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_arm64 && \
+    chmod +x /usr/local/bin/yq && \
+    yq --version
+
+# uv (astral) — run_ci_test.sh calls `uv run --no-sync ...`
+RUN wget -qO /tmp/uv.tar.gz \
+        https://github.com/astral-sh/uv/releases/download/0.7.2/uv-aarch64-unknown-linux-gnu.tar.gz && \
+    tar -xzf /tmp/uv.tar.gz -C /tmp && \
+    install -m 0755 /tmp/uv-aarch64-unknown-linux-gnu/uv /usr/local/bin/uv && \
+    install -m 0755 /tmp/uv-aarch64-unknown-linux-gnu/uvx /usr/local/bin/uvx && \
+    rm -rf /tmp/uv.tar.gz /tmp/uv-aarch64-unknown-linux-gnu && \
+    uv --version
+
+# -----------------------------------------------------------------------------
+# Layer 2: PyTorch (CPU wheel) + torch_npu plugin
+#   NPU compute is provided by torch_npu; torch itself is the CPU aarch64 wheel.
+# -----------------------------------------------------------------------------
+RUN pip3 install --no-cache-dir \
+        https://download.pytorch.org/whl/cpu/torch-2.7.1%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl && \
+    pip3 install --no-cache-dir \
+        https://gitcode.com/Ascend/pytorch/releases/download/v7.3.0-pytorch2.7.1/torch_npu-2.7.1.post2-cp312-cp312-manylinux_2_28_aarch64.whl && \
+    python3 -c "import torch, torch_npu; print('torch', torch.__version__, '| torch_npu', torch_npu.__version__)"
+
+# -----------------------------------------------------------------------------
+# Layer 3: NVIDIA Megatron-LM (baseline) + TransformerEngine-FL (pinned commit)
+#   - NVIDIA Megatron-LM is installed ONLY as a baseline that provides the
+#     `megatron-core` package registration and its dependencies.
+#   - Megatron-LM-FL is DELIBERATELY NOT installed here: it is the code under
+#     test and is checked out + `pip install -e .` at CI time, overriding this
+#     baseline.
+#   - TE-FL is pinned to the exact commit validated on Ascend.
+# -----------------------------------------------------------------------------
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM && \
+    cd /workspace/Megatron-LM && \
+    pip3 install --no-cache-dir -e .
+
+ARG TE_FL_COMMIT=3b5fbb589b595a869578649ffef990c92fb1ed5a
+RUN git clone https://github.com/flagos-ai/TransformerEngine-FL.git /workspace/TransformerEngine-FL && \
+    cd /workspace/TransformerEngine-FL && \
+    git checkout ${TE_FL_COMMIT} && \
+    TE_FL_SKIP_CUDA=1 pip3 install --no-build-isolation --no-cache-dir -e . && \
+    python3 -c "import transformer_engine as te; print('TE-FL', te.__version__)"
+
+# -----------------------------------------------------------------------------
+# Layer 4: FlagScale (pinned commit) + its Ascend requirements
+#   NOTE: installing FlagScale requirements may pull in an incompatible torch
+#   (e.g. 2.8.0). We re-pin torch/torchvision in Layer 5 right after, so the
+#   final image always matches the validated versions.
+# -----------------------------------------------------------------------------
+ARG FLAGSCALE_COMMIT=75ad1ee5b2983d2c709707f290de5b0c818a2137
+RUN git clone https://github.com/flagos-ai/FlagScale.git /workspace/FlagScale && \
+    cd /workspace/FlagScale && \
+    git checkout ${FLAGSCALE_COMMIT} && \
+    pip3 install --no-cache-dir -e . && \
+    cd requirements && \
+    pip3 install --no-cache-dir -r common.txt && \
+    pip3 install --no-cache-dir -r dev.txt && \
+    cd ascend && \
+    pip3 install --no-cache-dir -r base.txt && \
+    pip3 install --no-cache-dir -r train.txt
+
+# -----------------------------------------------------------------------------
+# Layer 5: re-pin versions that FlagScale requirements may have upgraded,
+#          and install the unit-test dependencies.
+#   These exact versions come from the validated Ascend 910C environment.
+# -----------------------------------------------------------------------------
+# IMPORTANT (validated on Ascend 910C): installing FlagScale's Ascend
+# requirements upgrades torch (observed: to 2.8.0). Manual validation showed
+# that re-installing ONLY torch back to 2.7.1+cpu is sufficient to restore a
+# working environment -- torch_npu / torchvision do NOT need reinstalling.
+# So we deliberately re-pin torch alone here, mirroring the validated fix.
+RUN pip3 install --no-cache-dir --force-reinstall --no-deps \
+        https://download.pytorch.org/whl/cpu/torch-2.7.1%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl
+
+# The remaining "other dependencies" step from the validated manual process.
+# torch_npu is intentionally left untouched (already correct from Layer 2).
+RUN pip3 install --no-cache-dir \
+        protobuf==5.29.6 \
+        triton==3.5.0 && \
+    pip3 install --no-cache-dir torchvision==0.22.1 \
+        --index-url https://download.pytorch.org/whl/cpu
+
+# Test-only dependencies required by the unit test suite.
+# (mock and wrapt were the two that were missing during manual validation.)
+RUN pip3 install --no-cache-dir \
+        pytest==8.3.5 \
+        pytest-asyncio==0.25.3 \
+        pytest-cov==6.0.0 \
+        pytest-mock==3.14.0 \
+        pytest-random-order==1.1.1 \
+        coverage==7.6.10 \
+        mock==5.2.0 \
+        wrapt==2.2.2
+
+# -----------------------------------------------------------------------------
+# Final sanity check at build time: verify the pinned versions survived.
+# -----------------------------------------------------------------------------
+RUN python3 - <<'PY'
+import torch, torch_npu, transformer_engine
+import mock, wrapt, pytest, coverage
+assert torch.__version__.startswith("2.7.1"), torch.__version__
+assert torch_npu.__version__.startswith("2.7.1.post2"), torch_npu.__version__
+print("torch:", torch.__version__)
+print("torch_npu:", torch_npu.__version__)
+print("transformer_engine:", transformer_engine.__version__)
+print("build-time dependency check OK")
+PY
+
+WORKDIR /workspace
