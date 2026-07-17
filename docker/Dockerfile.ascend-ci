@@ -44,12 +44,21 @@ SHELL ["/bin/bash", "-lc"]
 # Layer 1: system tools (git, build toolchain, gettext-base for envsubst)
 #          yq + uv are installed as static binaries.
 # -----------------------------------------------------------------------------
-RUN apt-get update -qq && \
+# apt does NOT read the --build-arg HTTP_PROXY automatically, so we write a
+# temporary apt proxy config from the build-arg, use it, then delete it in the
+# same layer -- the proxy credentials never persist in the final image.
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+RUN if [ -n "${HTTP_PROXY}" ]; then \
+        printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
+            "${HTTP_PROXY}" "${HTTPS_PROXY}" > /etc/apt/apt.conf.d/01proxy; \
+    fi && \
+    apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         git wget curl ca-certificates \
         build-essential gcc g++ make cmake \
         gettext-base && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy
 
 # yq (mikefarah v4) — required by functional test shell scripts
 RUN wget -qO /usr/local/bin/yq \
