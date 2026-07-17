@@ -2,12 +2,20 @@
 # Megatron-LM-FL Ascend (NPU) CI image
 # Target: Ascend A3 (910C), aarch64, CANN 9.0.0, Python 3.12, torch 2.7.1
 #
-# Build (must run on an ARM64 / 910C host):
+# Image naming (per FlagCICD image scheme):
+#   <Harbor-URL>/<project>/<image>:<git-short-hash>-<backend>-<stage>
+#   dev  example: harbor.flagos.io/flagos-dev/megatron-lm-fl:<git-hash>-ascend-dev
+#   test example: harbor.flagos.io/flagos-test/megatron-lm-fl:<git-hash>-ascend-test
+#   (backend=ascend, stage=dev/test/release; dev is overwritable, test/release frozen)
+#
+# Build (must run on an ARM64 / 910C host). Proxy is passed via --build-arg only;
+# Docker automatically injects the predefined HTTP_PROXY/HTTPS_PROXY build args
+# into RUN steps at build time, and they are NOT written into the final image.
 #   docker build --network host \
 #     --build-arg HTTP_PROXY="$http_proxy" \
 #     --build-arg HTTPS_PROXY="$https_proxy" \
 #     -f docker/Dockerfile.ascend-ci \
-#     -t harbor.baai.ac.cn/flagscale/megatron-lm-fl:ascend-a3-cann9.0-torch2.7.1-py312 \
+#     -t harbor.flagos.io/flagos-dev/megatron-lm-fl:<git-hash>-ascend-dev \
 #     .
 #
 # This image bundles the *environment* only:
@@ -22,15 +30,12 @@
 # =============================================================================
 FROM quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12
 
-# Proxy is only needed at build time to reach pytorch.org / gitcode / github.
-# Passed as ARG (not ENV) so credentials do not persist in the final image env.
-ARG HTTP_PROXY=""
-ARG HTTPS_PROXY=""
-ENV http_proxy=${HTTP_PROXY} \
-    https_proxy=${HTTPS_PROXY} \
-    HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY} \
-    PIP_NO_CACHE_DIR=1 \
+# NOTE on proxy & credentials:
+#   HTTP_PROXY/HTTPS_PROXY are Docker predefined build args. Passing them via
+#   `--build-arg` makes them available to RUN steps automatically, WITHOUT an
+#   `ENV` line, so proxy credentials are NOT baked into the final image history.
+#   Do NOT add `ENV http_proxy=...` here.
+ENV PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-lc"]
@@ -85,10 +90,13 @@ RUN git clone https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM &
     pip3 install --no-cache-dir -e .
 
 ARG TE_FL_COMMIT=3b5fbb589b595a869578649ffef990c92fb1ed5a
+# Use the Tsinghua PyPI mirror for TE-FL: its dependency downloads are slow and
+# sometimes stall through the proxy; the mirror is much faster from within CN.
 RUN git clone https://github.com/flagos-ai/TransformerEngine-FL.git /workspace/TransformerEngine-FL && \
     cd /workspace/TransformerEngine-FL && \
     git checkout ${TE_FL_COMMIT} && \
-    TE_FL_SKIP_CUDA=1 pip3 install --no-build-isolation --no-cache-dir -e . && \
+    TE_FL_SKIP_CUDA=1 pip3 install --no-build-isolation --no-cache-dir -e . \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple && \
     python3 -c "import transformer_engine as te; print('TE-FL', te.__version__)"
 
 # -----------------------------------------------------------------------------
@@ -101,13 +109,18 @@ ARG FLAGSCALE_COMMIT=75ad1ee5b2983d2c709707f290de5b0c818a2137
 RUN git clone https://github.com/flagos-ai/FlagScale.git /workspace/FlagScale && \
     cd /workspace/FlagScale && \
     git checkout ${FLAGSCALE_COMMIT} && \
-    pip3 install --no-cache-dir -e . && \
+    pip3 install --no-cache-dir -e . \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple && \
     cd requirements && \
-    pip3 install --no-cache-dir -r common.txt && \
-    pip3 install --no-cache-dir -r dev.txt && \
+    pip3 install --no-cache-dir -r common.txt \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip3 install --no-cache-dir -r dev.txt \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple && \
     cd ascend && \
-    pip3 install --no-cache-dir -r base.txt && \
-    pip3 install --no-cache-dir -r train.txt
+    pip3 install --no-cache-dir -r base.txt \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip3 install --no-cache-dir -r train.txt \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # -----------------------------------------------------------------------------
 # Layer 5: re-pin versions that FlagScale requirements may have upgraded,
