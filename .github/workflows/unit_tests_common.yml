@@ -228,7 +228,19 @@ jobs:
             > "$COVERAGE_DIR/.coveragerc"
           RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
           
-          torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH --ignore=tests/functional_tests $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
+          # NPU: skip the coverage wrapper because the double -m in
+          # "torchrun -m coverage run ... -m pytest" confuses torchrun's
+          # argument parser on this torch version, causing every rank to
+          # try to open a file named 'path'. Use plain pytest instead.
+          if [ "$PLATFORM" = "npu" ]; then
+            torchrun --nproc_per_node=$NUM_GPUS -m pytest -- \
+              -v $FINAL_TEST_PATH --ignore=tests/functional_tests \
+              $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
+          else
+            torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -- \
+              -v $FINAL_TEST_PATH --ignore=tests/functional_tests \
+              $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
+          fi
           exit_code=$?
 
           # Combine coverage fragments and generate JSON report
